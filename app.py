@@ -30,17 +30,29 @@ GIDS = {"tendencia": 399244680, "region": 317923059, "lotes": 967699280}
 LOCAL_DIR = Path(__file__).parent / "data"
 CACHE_TTL = 600  # segundos; el tablero vuelve a leer el sheet cada 10 min
 
-INK = "#1B3A5C"      # azul tela de encuadernación
-GREEN = "#2F7A67"    # verde botella
-GOLD = "#B8892B"     # dorado de lomo
-PLUM = "#7A4E7E"
-SLATE = "#5E7387"
-OXBLOOD = "#9C4A3C"
-MUTED = "#6B7385"
-LINE = "#E3E6EB"
-PALETTE = [INK, GREEN, GOLD, PLUM, SLATE, OXBLOOD, "#3F8FB0", "#6E8B3D"]
-SEQ_SCALE = [[0, "#EEF2F6"], [0.35, "#A9BCCF"], [0.7, "#4F7195"], [1, INK]]
-
+THEMES = {
+    "Bosque y ocre": dict(
+        primary="#1F4D3F", accent="#C98A22", up="#2E7D5B", down="#A23B3B",
+        neutral="#7B847F", text="#1C2321", muted="#6A726E", line="#E4E6E2",
+        bg="#FAFAF8", sidebar="#F1F2EE", note="#F3F4EF", land="#ECEEEA",
+        palette=["#1F4D3F", "#C98A22", "#7C3E5C", "#6F8F7F", "#8A8F3A", "#4A4F4C", "#B98F6A", "#2E8577"],
+        seq=["#F4F1E6", "#E2CF97", "#B99A4A", "#5E7A4E", "#1F4D3F"],
+    ),
+    "CMYK imprenta": dict(
+        primary="#15171A", accent="#C2185B", up="#00838F", down="#C2185B",
+        neutral="#7A7F87", text="#15171A", muted="#666B73", line="#E6E7EA",
+        bg="#FCFCFD", sidebar="#F2F3F5", note="#F5F0F3", land="#EEEFF1",
+        palette=["#15171A", "#C2185B", "#00838F", "#E0A800", "#6D6F75", "#8E44AD", "#43A047", "#EF6C00"],
+        seq=["#FFFDE7", "#FFE082", "#F48FB1", "#AD1457", "#3A0A1F"],
+    ),
+    "Grafito y vino": dict(
+        primary="#2F3033", accent="#8C2F39", up="#4F7A5A", down="#8C2F39",
+        neutral="#8F877C", text="#232326", muted="#6E6A66", line="#E7E4E0",
+        bg="#FAF9F8", sidebar="#F0EEEC", note="#F4EFEE", land="#ECEAE7",
+        palette=["#2F3033", "#8C2F39", "#A88B5C", "#4F7A5A", "#6C5B7B", "#9C9387", "#C06C4A", "#3E6B6B"],
+        seq=["#F7F3EF", "#E4CFC2", "#C58F84", "#8C2F39", "#3B1519"],
+    ),
+}
 MESES = ["ene", "feb", "mar", "abr", "may", "jun",
          "jul", "ago", "sep", "oct", "nov", "dic"]
 
@@ -50,6 +62,19 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+with st.sidebar:
+    theme_name = st.selectbox("Tema de color", list(THEMES), index=0)
+T = THEMES[theme_name]
+INK, GOLD, GREEN, OXBLOOD, SLATE = T["primary"], T["accent"], T["up"], T["down"], T["neutral"]
+MUTED, LINE, PALETTE = T["muted"], T["line"], T["palette"]
+SEQ_SCALE = [[i / (len(T["seq"]) - 1), c] for i, c in enumerate(T["seq"])]
+
+
+def hex_rgba(h: str, a: float) -> str:
+    h = h.lstrip("#")
+    return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{a})"
+
+
 # ---------------------------------------------------------------------------
 # Estilo
 # ---------------------------------------------------------------------------
@@ -57,6 +82,10 @@ st.markdown(
     f"""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600&display=swap');
+    .stApp {{ background: {T['bg']}; }}
+    section[data-testid="stSidebar"] {{ background: {T['sidebar']}; border-right: 1px solid {LINE}; }}
+    span[data-baseweb="tag"] {{ background: {hex_rgba(INK, .10)} !important; color: {INK} !important; }}
+    span[data-baseweb="tag"] svg {{ fill: {INK} !important; }}
     html, body, [class*="css"], .stMarkdown, .stDataFrame, button, input {{
         font-family: 'Source Sans 3', system-ui, sans-serif;
         font-feature-settings: "tnum" 1;
@@ -75,13 +104,23 @@ st.markdown(
     .kpi .l {{ font-size: .86rem; color: {MUTED}; margin-top: .2rem; }}
     .kpi .d {{ font-size: .82rem; margin-top: .15rem; }}
     .up {{ color: {GREEN}; }} .down {{ color: {OXBLOOD}; }}
-    .note {{ background: #F1F4F8; border-left: 3px solid {GOLD}; padding: .65rem .9rem;
-             font-size: .9rem; color: #364154; margin: .2rem 0 1rem 0; }}
-    .insight {{ border-bottom: 1px solid {LINE}; padding: .6rem 0; font-size: .95rem; color: #242C3B; }}
+    .note {{ background: {T['note']}; border-left: 3px solid {GOLD}; padding: .65rem .9rem;
+             font-size: .9rem; color: {T['text']}; margin: .2rem 0 1rem 0; }}
+    .insight {{ border-bottom: 1px solid {LINE}; padding: .6rem 0; font-size: .95rem; color: {T['text']}; }}
     .insight b {{ color: {INK}; }}
     .insight:last-child {{ border-bottom: none; }}
     .section-h {{ font-weight: 600; font-size: 1.08rem; color: {INK}; margin: .4rem 0 .5rem 0; }}
     div[data-testid="stTabs"] button p {{ font-size: .98rem; }}
+    div[data-testid="stTabs"] button[aria-selected="true"] p {{ color: {INK}; font-weight: 600; }}
+    div[data-testid="stTabs"] [data-baseweb="tab-highlight"] {{ background-color: {GOLD}; }}
+    .chip {{ display: inline-block; padding: .12rem .55rem; border-radius: 3px; font-size: .82rem;
+             font-weight: 600; margin-right: .35rem; }}
+    .card {{ border: 1px solid {LINE}; background: #FFFFFF; padding: .9rem 1rem; }}
+    .card .v {{ font-size: 1.45rem; font-weight: 600; color: {INK}; }}
+    .card .l {{ font-size: .84rem; color: {MUTED}; }}
+    .mover {{ display: flex; justify-content: space-between; padding: .35rem 0;
+              border-bottom: 1px solid {LINE}; font-size: .93rem; }}
+    .mover:last-child {{ border-bottom: none; }}
     @media (max-width: 900px) {{ .kpi-row {{ grid-template-columns: repeat(2, minmax(0,1fr)); }}
         .kpi + .kpi {{ border-left: none; padding-left: 0; }} }}
     </style>
@@ -92,7 +131,7 @@ st.markdown(
 # Plantilla de gráficos
 TEMPLATE = go.layout.Template(
     layout=dict(
-        font=dict(family="Source Sans 3, system-ui, sans-serif", size=13, color="#2A3345"),
+        font=dict(family="Source Sans 3, system-ui, sans-serif", size=13, color=T["text"]),
         colorway=PALETTE,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -150,6 +189,19 @@ def categoria(kw: str) -> str:
     return "Servicios editoriales"
 
 
+def intencion(kw: str) -> str:
+    k = f" {kw.lower()} "
+    if any(w in k for w in [" how ", " what ", " why ", "guide", "tips", "checklist", " vs ",
+                            "for beginners", "ideas", "template"]):
+        return "Informativa"
+    if any(w in k for w in ["cost", "price", "cheap", "affordable", " best ", "companies", "platforms"]):
+        return "Comparativa"
+    if any(w in k for w in ["service", "designer", "hire", "company", "editor", "consultant",
+                            "packages", "publish my", "get my"]):
+        return "Contratación"
+    return "Genérica"
+
+
 @st.cache_data(ttl=CACHE_TTL)
 def prepare(t: pd.DataFrame, r: pd.DataFrame, lotes: pd.DataFrame):
     t = t.copy()
@@ -174,6 +226,8 @@ def prepare(t: pd.DataFrame, r: pd.DataFrame, lotes: pd.DataFrame):
     t["Interes"] = t["Interes_0_100"] * t["Lote_ID"].map(factors).fillna(1)
     t["Categoria"] = t["Palabra_clave"].map(categoria)
     r["Categoria"] = r["Palabra_clave"].map(categoria)
+    t["Intencion"] = t["Palabra_clave"].map(intencion)
+    r["Intencion"] = r["Palabra_clave"].map(intencion)
     return t, r, escala_comun
 
 
@@ -225,6 +279,7 @@ def keyword_metrics(ts: pd.DataFrame) -> pd.DataFrame:
             estado = "Estable"
         rows.append(dict(
             Lote_ID=lote, Palabra_clave=kw, Categoria=g["Categoria"].iloc[0],
+            Intencion=g["Intencion"].iloc[0],
             Promedio_12m=m12, Promedio_prev=mp, Crecimiento=yoy, Pendiente=slope,
             Pico=peak_val, Mes_pico=peak_m, Estado=estado,
             Serie=s.iloc[-24:].round(1).tolist(),
@@ -238,7 +293,45 @@ def keyword_metrics(ts: pd.DataFrame) -> pd.DataFrame:
     g = m["Crecimiento"].replace([np.inf, -np.inf], np.nan).clip(-1, 3).fillna(0)
     m["Impulso"] = 100 * (g + 1) / 4
     m["Puntaje"] = (0.6 * m["Nivel_rel"] + 0.4 * m["Impulso"]).round(1)
+
+    def reco(row):
+        if row.Estado == "Sin volumen":
+            return "Descartar"
+        grows = row.Crecimiento == np.inf or (np.isfinite(row.Crecimiento) and row.Crecimiento >= 0.25)
+        big = row.Nivel_rel >= 50
+        if big and grows:
+            return "Priorizar"
+        if big:
+            return "Mantener"
+        if grows:
+            return "Explorar"
+        return "Baja prioridad"
+
+    m["Recomendacion"] = m.apply(reco, axis=1)
     return m
+
+
+RECO_TXT = {
+    "Priorizar": "Mucho interés y en crecimiento. Merece página propia, contenido y presupuesto de anuncios.",
+    "Mantener": "Mucho interés pero estable. Conviene tenerla cubierta en la web sin invertir de más.",
+    "Explorar": "Volumen todavía bajo pero creciendo rápido. Buena apuesta temprana para contenido.",
+    "Baja prioridad": "Poco interés y sin impulso. Solo como keyword secundaria.",
+    "Descartar": "Casi no se busca. No vale la pena trabajarla.",
+}
+
+
+def movers(ts: pd.DataFrame, n: int = 5):
+    """Cambio de los últimos 3 meses frente a los 3 anteriores."""
+    rows = []
+    for kw, g in ts.groupby("Palabra_clave"):
+        s = g.sort_values("Mes")["Interes"]
+        if len(s) < 6:
+            continue
+        a, b = s.iloc[-3:].mean(), s.iloc[-6:-3].mean()
+        if b >= 2:
+            rows.append((kw, (a - b) / b))
+    d = pd.DataFrame(rows, columns=["kw", "chg"]).sort_values("chg", ascending=False)
+    return d.head(n), d.tail(n).sort_values("chg")
 
 
 def level_shift(ts: pd.DataFrame, window: int = 6):
@@ -272,6 +365,15 @@ def seasonal_profile(ts: pd.DataFrame) -> pd.Series:
     d["idx"] = d["Interes"] / d["base"]
     d["mes"] = d["Mes"].dt.month
     return d.groupby("mes")["idx"].median()
+
+
+def seasonal_by_group(ts: pd.DataFrame, col: str) -> pd.DataFrame:
+    out = {}
+    for grp, g in ts.groupby(col):
+        p = seasonal_profile(g)
+        if len(p) == 12:
+            out[grp] = p
+    return pd.DataFrame(out).T
 
 
 @st.cache_data(ttl=CACHE_TTL, show_spinner=False)
@@ -359,6 +461,11 @@ with st.sidebar:
     cats = sorted(ts_all["Categoria"].unique())
     sel_cats = st.multiselect("Categoría", cats, default=cats)
 
+    intents = ["Informativa", "Comparativa", "Contratación", "Genérica"]
+    sel_int = st.multiselect("Intención de búsqueda", intents, default=intents,
+                             help="Informativa: cómo hacerlo. Comparativa: precios y opciones. "
+                                  "Contratación: busca un proveedor. Genérica: término amplio.")
+
     lote_ids = sorted(ts_all["Lote_ID"].unique())
     lote_labels = {
         row.Lote_ID: f"{row.Lote_ID} ({str(row.Palabras_clave_del_lote).split(',')[0]}…)"
@@ -379,13 +486,15 @@ mask = (
     ts_all["Mes"].dt.year.between(y0, y1)
     & ts_all["Categoria"].isin(sel_cats)
     & ts_all["Lote_ID"].isin(sel_lotes)
+    & ts_all["Intencion"].isin(sel_int)
 )
 ts = ts_all[mask].copy()
 if hide_dead:
     alive = ts_all.groupby("Palabra_clave")["Interes"].max()
     ts = ts[ts["Palabra_clave"].isin(alive[alive > 3].index)]
 
-reg = reg_all[reg_all["Lote_ID"].isin(sel_lotes) & reg_all["Categoria"].isin(sel_cats)]
+reg = reg_all[reg_all["Lote_ID"].isin(sel_lotes) & reg_all["Categoria"].isin(sel_cats)
+              & reg_all["Intencion"].isin(sel_int)]
 if hide_dead:
     reg = reg[reg["Palabra_clave"].isin(ts["Palabra_clave"].unique())]
 
@@ -443,9 +552,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_res, tab_trend, tab_map, tab_rank, tab_fc, tab_data = st.tabs(
-    ["Resumen", "Interés en el tiempo", "Mapa por país", "Ranking", "Proyecciones", "Datos"]
+tab_res, tab_kw, tab_trend, tab_map, tab_rank, tab_fc, tab_data = st.tabs(
+    ["Resumen", "Ficha de keyword", "Interés en el tiempo", "Mapa por país", "Ranking",
+     "Proyecciones", "Datos"]
 )
+RECO_COLORS = {"Priorizar": GREEN, "Mantener": INK, "Explorar": GOLD,
+               "Baja prioridad": SLATE, "Descartar": hex_rgba(SLATE, .5)}
 
 # ---------------------------------------------------------------------------
 # Resumen: lectura automática
@@ -495,8 +607,8 @@ with tab_res:
     with c2:
         st.markdown('<div class="section-h">Estado de las keywords</div>', unsafe_allow_html=True)
         order = ["En alza", "Nueva", "Estable", "En baja", "Sin volumen"]
-        colors = {"En alza": GREEN, "Nueva": "#3F8FB0", "Estable": SLATE,
-                  "En baja": OXBLOOD, "Sin volumen": "#B8BFCA"}
+        colors = {"En alza": GREEN, "Nueva": PALETTE[2], "Estable": SLATE,
+                  "En baja": OXBLOOD, "Sin volumen": hex_rgba(SLATE, .45)}
         est = metrics["Estado"].value_counts().reindex(order).dropna()
         fig = go.Figure(go.Bar(
             x=est.values, y=est.index, orientation="h",
@@ -515,6 +627,185 @@ with tab_res:
                       labels={"Suav": "Interés (media 3 meses)", "Mes": ""})
         fig.update_layout(template=TEMPLATE, height=300)
         st.plotly_chart(fig, width="stretch")
+
+    # --- Matriz de oportunidad + movimientos recientes
+    st.markdown("<br>", unsafe_allow_html=True)
+    c1, c2 = st.columns([2, 1], gap="large")
+    with c1:
+        st.markdown('<div class="section-h">Matriz de oportunidad</div>', unsafe_allow_html=True)
+        mx = metrics[metrics["Estado"] != "Sin volumen"].copy()
+        mx["Crec_plot"] = (mx["Crecimiento"].replace([np.inf], 3).clip(-1, 3).fillna(0) * 100)
+        mx["Tamano"] = mx["Pico"].clip(lower=5)
+        fig = px.scatter(
+            mx, x="Nivel_rel", y="Crec_plot", size="Tamano", color="Recomendacion",
+            color_discrete_map=RECO_COLORS, hover_name="Palabra_clave",
+            hover_data={"Lote_ID": True, "Nivel_rel": ":.0f", "Crec_plot": ":.0f",
+                        "Tamano": False, "Recomendacion": False},
+            labels={"Nivel_rel": "Interés reciente (relativo a su lote)",
+                    "Crec_plot": "Crecimiento anual (%)", "Recomendacion": ""},
+            size_max=26,
+        )
+        fig.add_vline(x=50, line=dict(color=LINE, width=1.5, dash="dot"))
+        fig.add_hline(y=25, line=dict(color=LINE, width=1.5, dash="dot"))
+        for x, y, t in [(97, 290, "Priorizar"), (3, 290, "Explorar"),
+                        (97, -90, "Mantener"), (3, -90, "Baja prioridad")]:
+            fig.add_annotation(x=x, y=y, text=t, showarrow=False, font=dict(color=MUTED, size=12),
+                               xanchor="right" if x > 50 else "left")
+        fig.update_traces(marker=dict(line=dict(width=1, color="white"), opacity=.9))
+        fig.update_layout(template=TEMPLATE, height=430, xaxis=dict(range=[-2, 102], showgrid=False),
+                          yaxis=dict(range=[-105, 310]))
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Cada punto es una keyword; el tamaño es su pico histórico. Arriba a la derecha "
+                   "están las que tienen mucho interés y siguen creciendo.")
+    with c2:
+        up, down = movers(ts)
+        st.markdown('<div class="section-h">Suben en los últimos 3 meses</div>', unsafe_allow_html=True)
+        st.markdown("".join(
+            f'<div class="mover"><span>{r.kw}</span><span class="up">{r.chg:+.0%}</span></div>'
+            for r in up.itertuples()) or "Sin datos suficientes.", unsafe_allow_html=True)
+        st.markdown('<br><div class="section-h">Bajan en los últimos 3 meses</div>', unsafe_allow_html=True)
+        st.markdown("".join(
+            f'<div class="mover"><span>{r.kw}</span><span class="down">{r.chg:+.0%}</span></div>'
+            for r in down.itertuples()) or "Sin datos suficientes.", unsafe_allow_html=True)
+        st.caption("Promedio de los últimos 3 meses frente a los 3 anteriores.")
+
+    # --- Mapa de categorías + intención
+    c1, c2 = st.columns(2, gap="large")
+    with c1:
+        st.markdown('<div class="section-h">Dónde está el interés</div>', unsafe_allow_html=True)
+        tm = metrics[metrics["Promedio_12m"] > 0]
+        fig = px.treemap(tm, path=[px.Constant("Todas"), "Categoria", "Palabra_clave"],
+                         values="Promedio_12m", color="Categoria",
+                         color_discrete_sequence=PALETTE)
+        fig.update_traces(root_color=T["bg"], marker=dict(line=dict(width=1.5, color="white")),
+                          hovertemplate="%{label}<br>Interés 12 m: %{value:.1f}<extra></extra>",
+                          textfont=dict(color="white"))
+        fig.update_layout(template=TEMPLATE, height=380, margin=dict(l=0, r=0, t=10, b=0))
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        st.markdown('<div class="section-h">Interés según la intención de búsqueda</div>',
+                    unsafe_allow_html=True)
+        it = (metrics[metrics["Estado"] != "Sin volumen"].groupby("Intencion")
+              .agg(Interes=("Nivel_rel", "mean"), Keywords=("Palabra_clave", "count"),
+                   Alza=("Estado", lambda x: (x == "En alza").mean())).reset_index()
+              .sort_values("Interes"))
+        fig = go.Figure(go.Bar(
+            x=it["Interes"], y=it["Intencion"], orientation="h",
+            marker_color=[PALETTE[i % len(PALETTE)] for i in range(len(it))],
+            text=[f"{v:.0f}  ({k} kw, {a:.0%} en alza)" for v, k, a in
+                  zip(it["Interes"], it["Keywords"], it["Alza"])],
+            textposition="outside", cliponaxis=False,
+        ))
+        fig.update_layout(template=TEMPLATE, height=380, xaxis=dict(visible=False, range=[0, 130]),
+                          yaxis=dict(gridcolor="rgba(0,0,0,0)"))
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Interés relativo promedio dentro de cada lote. Sirve para ver qué tipo de "
+                   "búsqueda conviene atacar con contenido (informativa) o con ventas (contratación).")
+
+    # --- Calendario de campañas
+    st.markdown('<div class="section-h">Calendario de campañas por categoría</div>', unsafe_allow_html=True)
+    cal = seasonal_by_group(ts, "Categoria")
+    if len(cal):
+        z = (cal.values - 1) * 100
+        fig = go.Figure(go.Heatmap(
+            z=z, x=MESES, y=cal.index, zmid=0,
+            colorscale=[[0, hex_rgba(SLATE, .9)], [0.5, "#FFFFFF"], [1, GOLD]],
+            text=np.vectorize(lambda v: f"{v:+.0f}%")(z), texttemplate="%{text}",
+            hovertemplate="%{y}, %{x}: %{text} vs. un mes promedio<extra></extra>",
+            xgap=2, ygap=2, colorbar=dict(thickness=10, outlinewidth=0, ticksuffix="%"),
+        ))
+        fig.update_layout(template=TEMPLATE, height=80 + 42 * len(cal),
+                          yaxis=dict(gridcolor="rgba(0,0,0,0)"))
+        st.plotly_chart(fig, width="stretch")
+        st.caption("Meses en dorado: el interés sube respecto a un mes normal. "
+                   "Buenos momentos para lanzar campañas de esa categoría.")
+
+# ---------------------------------------------------------------------------
+# Ficha de keyword
+# ---------------------------------------------------------------------------
+with tab_kw:
+    kw_list = metrics.sort_values("Puntaje", ascending=False)["Palabra_clave"].tolist()
+    kw_d = st.selectbox("Elige una palabra clave", kw_list, key="ficha_kw")
+    row = metrics[metrics["Palabra_clave"] == kw_d].iloc[0]
+    serie = ts_all[ts_all["Palabra_clave"] == kw_d].sort_values("Mes")
+    prof_kw = seasonal_profile(serie)
+    best_month = MESES[prof_kw.idxmax() - 1] if len(prof_kw) == 12 else "–"
+    rkw = reg_all[reg_all["Palabra_clave"] == kw_d].sort_values("Interes_0_100", ascending=False)
+    best_country = rkw.iloc[0]["Region"] if len(rkw) and rkw.iloc[0]["Interes_0_100"] > 0 else "–"
+    fc6, _ = forecast(tuple(serie["Interes"]), tuple(serie["Mes"].astype(str)), 6)
+    now3 = serie["Interes"].iloc[-3:].mean()
+    fut3 = fc6["Pronostico"].iloc[-3:].mean()
+    chg6 = (fut3 - now3) / now3 if now3 > 0 else np.nan
+    reco_c = RECO_COLORS[row["Recomendacion"]]
+
+    st.markdown(
+        f'<div style="margin:.3rem 0 .8rem 0">'
+        f'<span class="chip" style="background:{hex_rgba(reco_c, .14)};color:{reco_c}">{row["Recomendacion"]}</span>'
+        f'<span class="chip" style="background:{hex_rgba(SLATE, .12)};color:{T["text"]}">{row["Categoria"]}</span>'
+        f'<span class="chip" style="background:{hex_rgba(SLATE, .12)};color:{T["text"]}">Intención {row["Intencion"].lower()}</span>'
+        f'<span class="chip" style="background:{hex_rgba(SLATE, .12)};color:{T["text"]}">Lote {row["Lote_ID"]}</span>'
+        f'</div><p style="max-width:75ch;margin:0 0 1rem 0">{RECO_TXT[row["Recomendacion"]]}</p>',
+        unsafe_allow_html=True)
+
+    cards = [
+        (f"{now3:.0f}", "Interés actual (prom. 3 meses)"),
+        (f"{row['Pico']:.0f}", f"Pico histórico, {mes_txt(row['Mes_pico'])}"),
+        (fmt_pct(row["Crecimiento"]), "Crecimiento anual"),
+        (best_month, "Mes más fuerte del año"),
+        (best_country, "País donde más pesa"),
+        (fmt_pct(chg6) if np.isfinite(chg6) else "–", "Proyección a 6 meses"),
+    ]
+    cols = st.columns(6)
+    for c, (v, l) in zip(cols, cards):
+        c.markdown(f'<div class="card"><div class="v">{v}</div><div class="l">{l}</div></div>',
+                   unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    c1, c2 = st.columns([2, 1], gap="large")
+    with c1:
+        st.markdown('<div class="section-h">Evolución y proyección</div>', unsafe_allow_html=True)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=serie["Mes"], y=serie["Interes"], name="Mensual",
+                                 line=dict(color=hex_rgba(INK, .35), width=1.4)))
+        fig.add_trace(go.Scatter(x=serie["Mes"], y=serie["Interes"].rolling(6, min_periods=1).mean(),
+                                 name="Tendencia (media 6 meses)", line=dict(color=INK, width=2.6)))
+        fig.add_trace(go.Scatter(x=pd.concat([fc6["Mes"], fc6["Mes"][::-1]]),
+                                 y=pd.concat([fc6["Max"], fc6["Min"][::-1]]), fill="toself",
+                                 fillcolor=hex_rgba(GOLD, .18), line=dict(width=0),
+                                 name="Rango probable", hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=fc6["Mes"], y=fc6["Pronostico"], name="Proyección",
+                                 line=dict(color=GOLD, width=2.4, dash="dot")))
+        if pd.notna(row["Mes_pico"]):
+            fig.add_annotation(x=row["Mes_pico"], y=row["Pico"], text="Pico", showarrow=True,
+                               arrowhead=0, ay=-28, font=dict(color=MUTED))
+        fig.update_layout(template=TEMPLATE, height=380, hovermode="x unified")
+        st.plotly_chart(fig, width="stretch")
+    with c2:
+        st.markdown('<div class="section-h">Países con más peso</div>', unsafe_allow_html=True)
+        tc = rkw[rkw["Interes_0_100"] > 0].head(10)
+        if len(tc):
+            fig = go.Figure(go.Bar(x=tc["Interes_0_100"], y=tc["Region"], orientation="h",
+                                   marker_color=GOLD, text=tc["Interes_0_100"].round(0),
+                                   textposition="outside", cliponaxis=False))
+            fig.update_layout(template=TEMPLATE, height=380, xaxis=dict(visible=False, range=[0, 115]),
+                              yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.caption("Sin datos por país para esta keyword.")
+
+    # Keywords con comportamiento parecido
+    same = ts_all[ts_all["Lote_ID"] == row["Lote_ID"]].pivot_table(
+        index="Mes", columns="Palabra_clave", values="Interes")
+    if kw_d in same and same.shape[1] > 1:
+        corr = same.corr()[kw_d].drop(kw_d).dropna().sort_values(ascending=False).head(3)
+        if len(corr):
+            st.markdown('<div class="section-h">Se mueven parecido (mismo lote)</div>',
+                        unsafe_allow_html=True)
+            st.markdown(" ".join(
+                f'<span class="chip" style="background:{hex_rgba(INK, .08)};color:{INK}">'
+                f'{k} ({v:.0%})</span>' for k, v in corr.items()), unsafe_allow_html=True)
+            st.caption("Correlación de las curvas mensuales. Sirven como keywords secundarias "
+                       "en la misma página o campaña.")
 
 # ---------------------------------------------------------------------------
 # Interés en el tiempo
@@ -589,7 +880,7 @@ with tab_map:
                 labels={"Interes_0_100": "Interés"},
             )
             fig.update_geos(showframe=False, showcoastlines=False, projection_type="natural earth",
-                            showland=True, landcolor="#F3F4F6", showcountries=True,
+                            showland=True, landcolor=T["land"], showcountries=True,
                             countrycolor="#FFFFFF", bgcolor="rgba(0,0,0,0)")
             fig.update_layout(template=TEMPLATE, height=470, margin=dict(l=0, r=0, t=10, b=0),
                               coloraxis_colorbar=dict(thickness=10, outlinewidth=0, title=None))
@@ -626,6 +917,25 @@ with tab_map:
                           xaxis=dict(tickangle=-45), yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
         st.plotly_chart(fig, width="stretch")
 
+        st.markdown('<div class="section-h">Comparar dos países</div>', unsafe_allow_html=True)
+        cc = sorted(dh["Region"].unique())
+        d1, d2 = st.columns(2)
+        default_a = cc.index("United States") if "United States" in cc else 0
+        default_b = cc.index("Ireland") if "Ireland" in cc else min(1, len(cc) - 1)
+        pa = d1.selectbox("País A", cc, index=default_a, key="pa")
+        pb = d2.selectbox("País B", cc, index=default_b, key="pb")
+        cmp_ = dh[dh["Region"].isin([pa, pb])].pivot_table(
+            index="Palabra_clave", columns="Region", values="Interes_0_100").fillna(0)
+        cmp_ = cmp_.loc[cmp_.sum(axis=1).sort_values().index]
+        fig = go.Figure()
+        for ctry, colr in [(pa, INK), (pb, GOLD)]:
+            if ctry in cmp_:
+                fig.add_trace(go.Bar(y=cmp_.index, x=cmp_[ctry], name=ctry, orientation="h",
+                                     marker_color=colr))
+        fig.update_layout(template=TEMPLATE, barmode="group", height=120 + 44 * len(cmp_),
+                          yaxis=dict(gridcolor="rgba(0,0,0,0)"), xaxis=dict(title="Peso en el lote (%)"))
+        st.plotly_chart(fig, width="stretch")
+
 # ---------------------------------------------------------------------------
 # Ranking
 # ---------------------------------------------------------------------------
@@ -646,12 +956,14 @@ with tab_rank:
     rk["Crec_txt"] = rk["Crecimiento"].map(fmt_pct)
     rk["Pico_txt"] = rk["Mes_pico"].map(mes_txt)
     st.dataframe(
-        rk[["Palabra_clave", "Categoria", "Lote_ID", "Puntaje", "Promedio_12m",
-            "Crec_txt", "Pico_txt", "Estado", "Serie"]],
+        rk[["Palabra_clave", "Recomendacion", "Categoria", "Intencion", "Lote_ID", "Puntaje",
+            "Promedio_12m", "Crec_txt", "Pico_txt", "Estado", "Serie"]],
         width="stretch", height=min(38 * (len(rk) + 1), 720),
         column_config={
             "Palabra_clave": st.column_config.TextColumn("Palabra clave", width="medium"),
+            "Recomendacion": st.column_config.TextColumn("Acción", width="small"),
             "Categoria": "Categoría",
+            "Intencion": st.column_config.TextColumn("Intención", width="small"),
             "Lote_ID": st.column_config.TextColumn("Lote", width="small"),
             "Puntaje": st.column_config.ProgressColumn("Puntaje", min_value=0, max_value=100, format="%.0f"),
             "Promedio_12m": st.column_config.NumberColumn("Interés 12 m", format="%.1f"),
@@ -707,7 +1019,7 @@ with tab_fc:
     fig.add_trace(go.Scatter(
         x=pd.concat([fc["Mes"], fc["Mes"][::-1]]),
         y=pd.concat([fc["Max"], fc["Min"][::-1]]),
-        fill="toself", fillcolor="rgba(184,137,43,0.16)", line=dict(width=0),
+        fill="toself", fillcolor=hex_rgba(GOLD, .18), line=dict(width=0),
         name="Rango probable (80%)", hoverinfo="skip"))
     fig.add_trace(go.Scatter(
         x=pd.concat([hist["Mes"].iloc[-1:], fc["Mes"]]),
