@@ -1,0 +1,174 @@
+"""
+Tablero de palabras clave editoriales (Google Trends)
+Lee el master file de Google Sheets (o copias CSV locales) y se actualiza
+solo cada vez que se agregan lotes nuevos.
+
+Ejecutar:  streamlit run app.py
+"""
+
+from __future__ import annotations
+
+import io
+import warnings
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import pycountry
+import requests
+import streamlit as st
+
+warnings.filterwarnings("ignore")
+
+# ---------------------------------------------------------------------------
+# Configuración
+# ---------------------------------------------------------------------------
+SHEET_ID = "1YE0iUqr26R34AUxbAEhRSPce4rxJbk6sbjmlasExvUY"
+GIDS = {"tendencia": 399244680, "region": 317923059, "lotes": 967699280}
+LOCAL_DIR = Path(__file__).parent / "data"
+CACHE_TTL = 600  # segundos; el tablero vuelve a leer el sheet cada 10 min
+
+INK = "#1B3A5C"      # azul tela de encuadernación
+GREEN = "#2F7A67"    # verde botella
+GOLD = "#B8892B"     # dorado de lomo
+PLUM = "#7A4E7E"
+SLATE = "#5E7387"
+OXBLOOD = "#9C4A3C"
+MUTED = "#6B7385"
+LINE = "#E3E6EB"
+PALETTE = [INK, GREEN, GOLD, PLUM, SLATE, OXBLOOD, "#3F8FB0", "#6E8B3D"]
+SEQ_SCALE = [[0, "#EEF2F6"], [0.35, "#A9BCCF"], [0.7, "#4F7195"], [1, INK]]
+
+MESES = ["ene", "feb", "mar", "abr", "may", "jun",
+         "jul", "ago", "sep", "oct", "nov", "dic"]
+
+st.set_page_config(
+    page_title="Tendencias editoriales",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ---------------------------------------------------------------------------
+# Estilo
+# ---------------------------------------------------------------------------
+st.markdown(
+    f"""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,600&display=swap');
+    html, body, [class*="css"], .stMarkdown, .stDataFrame, button, input {{
+        font-family: 'Source Sans 3', system-ui, sans-serif;
+        font-feature-settings: "tnum" 1;
+    }}
+    .block-container {{ padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1400px; }}
+    h1.title {{
+        font-family: 'Source Serif 4', Georgia, serif; font-weight: 600;
+        font-size: 2.05rem; color: {INK}; margin: 0 0 .15rem 0; letter-spacing: -.01em;
+    }}
+    p.subtitle {{ color: {MUTED}; font-size: .98rem; margin: 0 0 1.2rem 0; max-width: 72ch; }}
+    .kpi-row {{ display: grid; grid-template-columns: repeat(5, minmax(0,1fr));
+               border-top: 2px solid {INK}; border-bottom: 1px solid {LINE}; margin-bottom: 1.2rem; }}
+    .kpi {{ padding: .8rem 1rem .9rem 0; }}
+    .kpi + .kpi {{ padding-left: 1rem; border-left: 1px solid {LINE}; }}
+    .kpi .v {{ font-size: 1.75rem; font-weight: 600; color: {INK}; line-height: 1.1; }}
+    .kpi .l {{ font-size: .86rem; color: {MUTED}; margin-top: .2rem; }}
+    .kpi .d {{ font-size: .82rem; margin-top: .15rem; }}
+    .up {{ color: {GREEN}; }} .down {{ color: {OXBLOOD}; }}
+    .note {{ background: #F1F4F8; border-left: 3px solid {GOLD}; padding: .65rem .9rem;
+             font-size: .9rem; color: #364154; margin: .2rem 0 1rem 0; }}
+    .insight {{ border-bottom: 1px solid {LINE}; padding: .6rem 0; font-size: .95rem; color: #242C3B; }}
+    .insight b {{ color: {INK}; }}
+    .insight:last-child {{ border-bottom: none; }}
+    .section-h {{ font-weight: 600; font-size: 1.08rem; color: {INK}; margin: .4rem 0 .5rem 0; }}
+    div[data-testid="stTabs"] button p {{ font-size: .98rem; }}
+    @media (max-width: 900px) {{ .kpi-row {{ grid-template-columns: repeat(2, minmax(0,1fr)); }}
+        .kpi + .kpi {{ border-left: none; padding-left: 0; }} }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Plantilla de gráficos
+TEMPLATE = go.layout.Template(
+    layout=dict(
+        font=dict(family="Source Sans 3, system-ui, sans-serif", size=13, color="#2A3345"),
+        colorway=PALETTE,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(showgrid=False, linecolor=LINE, ticks="outside", tickcolor=LINE),
+        yaxis=dict(gridcolor=LINE, zeroline=False),
+        legend=dict(orientation="h", y=-0.18, x=0, title=None),
+        hoverlabel=dict(bgcolor="white", font_size=13),
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Datos
+# ---------------------------------------------------------------------------
+def _sheet_url(gid: int) -> str:
+    return f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={gid}"
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner="Leyendo el master file…")
+def load_raw(source: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
+    if source == "sheet":
+        frames = {}
+        for key, gid in GIDS.items():
+            r = requests.get(_sheet_url(gid), timeout=30)
+            r.raise_for_status()
+            if "text/html" in r.headers.get("Content-Type", ""):
+                raise PermissionError("El sheet no es público para lectura.")
+            frames[key] = pd.read_csv(io.StringIO(r.content.decode("utf-8")))
+        origin = "Google Sheets (en vivo)"
+    else:
+        frames = {
+            "tendencia": pd.read_csv(LOCAL_DIR / "Raw_Tendencia.csv"),
+            "region": pd.read_csv(LOCAL_DIR / "Raw_Region.csv"),
+            "lotes": pd.read_csv(LOCAL_DIR / "Lotes.csv"),
+        }
+        origin = "Archivos locales (carpeta data/)"
+    return frames["tendencia"], frames["region"], frames["lotes"], origin
+
+
+def categoria(kw: str) -> str:
+    k = kw.lower()
+    if "cover" in k or "jacket" in k or "illustrat" in k:
+        return "Portadas"
+    if any(w in k for w in ["edit", "proofread"]):
+        return "Edición y corrección"
+    if any(w in k for w in ["format", "typeset", "layout", "interior", "epub", "conversion"]):
+        return "Maquetación y formato"
+    if any(w in k for w in ["launch", "distribution", "market", "promot"]):
+        return "Lanzamiento y distribución"
+    if "print" in k:
+        return "Impresión"
+    if any(w in k for w in ["self publish", "indie", "hybrid", "kdp", "kindle"]):
+        return "Autopublicación"
+    return "Servicios editoriales"
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def prepare(t: pd.DataFrame, r: pd.DataFrame, lotes: pd.DataFrame):
+    t = t.copy()
+    r = r.copy()
+    for df in (t, r):
+        df.columns = [c.strip() for c in df.columns]
+        df["Palabra_clave"] = df["Palabra_clave"].astype(str).str.strip()
+        df["Lote_ID"] = df["Lote_ID"].astype(str).str.strip()
+        df["Interes_0_100"] = pd.to_numeric(df["Interes_0_100"], errors="coerce").fillna(0)
+    t["Mes"] = pd.to_datetime(t["Mes"].astype(str).str.lstrip("'"), errors="coerce")
+    t = t.dropna(subset=["Mes"])
+    r["Region"] = r["Region"].astype(str).str.strip()
+
+    # Factor de escala por lote (opcional). Cuando exista la columna
+    # "Factor_escala" en la pestaña Lotes, se usa para llevar todo a una escala común.
+    factors = pd.Series(1.0, index=sorted(t["Lote_ID"].unique()))
+    if "Factor_escala" in lotes.columns:
+        f = lotes.set_index("Lote_ID")["Factor_escala"]
+        f = pd.to_numeric(f, errors="coerce").dropna()
+        factors.update(f)
+    escala_comun = bool((factors != 1).any())
+    t["Interes"] = t["Interes_0_100"] * t["Lote_ID"].map(factors).fillna(1)
