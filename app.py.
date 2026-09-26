@@ -172,3 +172,583 @@ def prepare(t: pd.DataFrame, r: pd.DataFrame, lotes: pd.DataFrame):
         factors.update(f)
     escala_comun = bool((factors != 1).any())
     t["Interes"] = t["Interes_0_100"] * t["Lote_ID"].map(factors).fillna(1)
+    t["Categoria"] = t["Palabra_clave"].map(categoria)
+    r["Categoria"] = r["Palabra_clave"].map(categoria)
+    return t, r, escala_comun
+
+
+def iso3(name: str) -> str | None:
+    overrides = {
+        "Türkiye": "TUR", "St. Helena": "SHN", "Myanmar (Burma)": "MMR",
+        "Côte d’Ivoire": "CIV", "Côte d'Ivoire": "CIV", "South Korea": "KOR",
+        "Russia": "RUS", "Iran": "IRN", "Vietnam": "VNM", "Taiwan": "TWN",
+        "Czechia": "CZE", "Hong Kong": "HKG", "Laos": "LAO", "Bolivia": "BOL",
+        "Venezuela": "VEN", "Tanzania": "TZA", "Syria": "SYR", "Moldova": "MDA",
+    }
+    if name in overrides:
+        return overrides[name]
+    try:
+        return pycountry.countries.lookup(name).alpha_3
+    except LookupError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Métricas e interpretación
+# ---------------------------------------------------------------------------
+def keyword_metrics(ts: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for (lote, kw), g in ts.groupby(["Lote_ID", "Palabra_clave"]):
+        g = g.sort_values("Mes")
+        s = g.set_index("Mes")["Interes"]
+        last12 = s.iloc[-12:]
+        prev12 = s.iloc[-24:-12] if len(s) >= 24 else s.iloc[: max(len(s) - 12, 0)]
+        m12 = last12.mean()
+        mp = prev12.mean() if len(prev12) else np.nan
+        # Con una base muy baja el % se dispara y engaña: se marca como "nueva"
+        if mp is not None and np.isfinite(mp) and mp >= 2:
+            yoy = (m12 - mp) / mp
+        else:
+            yoy = np.inf if m12 >= 3 else np.nan
+        slope = np.polyfit(np.arange(len(last12)), last12.values, 1)[0] if len(last12) > 2 else 0
+        peak_val = s.max()
+        peak_m = s.idxmax() if peak_val > 0 else pd.NaT
+        if peak_val <= 3:
+            estado = "Sin volumen"
+        elif np.isfinite(yoy) and yoy >= 0.25:
+            estado = "En alza"
+        elif np.isfinite(yoy) and yoy <= -0.2:
+            estado = "En baja"
+        elif yoy == np.inf:
+            estado = "Nueva"
+        else:
+            estado = "Estable"
+        rows.append(dict(
+            Lote_ID=lote, Palabra_clave=kw, Categoria=g["Categoria"].iloc[0],
+            Promedio_12m=m12, Promedio_prev=mp, Crecimiento=yoy, Pendiente=slope,
+            Pico=peak_val, Mes_pico=peak_m, Estado=estado,
+            Serie=s.iloc[-24:].round(1).tolist(),
+        ))
+    m = pd.DataFrame(rows)
+    if m.empty:
+        return m
+    # Puntuación: nivel reciente dentro del lote (60%) + impulso (40%)
+    m["Nivel_rel"] = m.groupby("Lote_ID")["Promedio_12m"].transform(
+        lambda x: 100 * x / x.max() if x.max() > 0 else 0)
+    g = m["Crecimiento"].replace([np.inf, -np.inf], np.nan).clip(-1, 3).fillna(0)
+    m["Impulso"] = 100 * (g + 1) / 4
+    m["Puntaje"] = (0.6 * m["Nivel_rel"] + 0.4 * m["Impulso"]).round(1)
+    return m
+
+
+def level_shift(ts: pd.DataFrame, window: int = 6):
+    """Mes con el mayor cambio de nivel (promedio 6m después vs. antes) por keyword."""
+    out = []
+    for kw, g in ts.groupby("Palabra_clave"):
+        s = g.sort_values("Mes").set_index("Mes")["Interes"]
+        if len(s) < 2 * window + 1 or s.max() <= 3:
+            continue
+        best, best_m = 0, None
+        for i in range(window, len(s) - window):
+            before, after = s.iloc[i - window:i].mean(), s.iloc[i:i + window].mean()
+            ratio = (after + 1) / (before + 1)
+            if ratio > best:
+                best, best_m = ratio, s.index[i]
+        if best >= 1.8:
+            out.append((kw, best_m, best))
+    return out
+
+
+def seasonal_profile(ts: pd.DataFrame) -> pd.Series:
+    """Índice estacional promedio (1 = mes normal) usando años completos."""
+    # Se divide cada mes por su media móvil centrada de 13 meses, así los
+    # cambios de nivel (como el salto de ago 2025) no se confunden con estacionalidad.
+    d = ts.sort_values("Mes").copy()
+    d["base"] = d.groupby("Palabra_clave")["Interes"].transform(
+        lambda x: x.rolling(13, center=True, min_periods=13).mean())
+    d = d[(d["base"] >= 3)]
+    if d.empty:
+        return pd.Series(dtype=float)
+    d["idx"] = d["Interes"] / d["base"]
+    d["mes"] = d["Mes"].dt.month
+    return d.groupby("mes")["idx"].median()
+
+
+@st.cache_data(ttl=CACHE_TTL, show_spinner=False)
+def forecast(values: tuple, dates: tuple, horizon: int):
+    s = pd.Series(values, index=pd.to_datetime(list(dates))).asfreq("MS").fillna(0)
+    idx = pd.date_range(s.index[-1] + pd.offsets.MonthBegin(), periods=horizon, freq="MS")
+    method = "Holt-Winters (tendencia amortiguada + estacionalidad)"
+    try:
+        from statsmodels.tsa.holtwinters import ExponentialSmoothing
+        if len(s) >= 30 and s.sum() > 0:
+            model = ExponentialSmoothing(s, trend="add", damped_trend=True,
+                                         seasonal="add", seasonal_periods=12,
+                                         initialization_method="estimated").fit()
+        else:
+            model = ExponentialSmoothing(s, trend="add", damped_trend=True,
+                                         initialization_method="estimated").fit()
+            method = "Holt (tendencia amortiguada)"
+        fc = np.asarray(model.forecast(horizon))
+        resid = np.asarray(s - model.fittedvalues)
+    except Exception:
+        x = np.arange(len(s))
+        coef = np.polyfit(x[-18:], s.values[-18:], 1)
+        fc = np.polyval(coef, np.arange(len(s), len(s) + horizon))
+        resid = s.values[-18:] - np.polyval(coef, x[-18:])
+        method = "Tendencia lineal (18 meses)"
+    sd = np.nanstd(resid[-24:])
+    band = 1.28 * sd * np.sqrt(np.arange(1, horizon + 1))  # ~80%
+    fc = np.clip(fc, 0, None)
+    return pd.DataFrame({
+        "Mes": idx, "Pronostico": fc,
+        "Min": np.clip(fc - band, 0, None), "Max": fc + band,
+    }), method
+
+
+def fmt_pct(x) -> str:
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "–"
+    if np.isinf(x):
+        return "nueva"
+    return f"{x:+.0%}"
+
+
+def mes_txt(d) -> str:
+    return f"{MESES[d.month - 1]} {d.year}" if pd.notna(d) else "–"
+
+
+# ---------------------------------------------------------------------------
+# Carga
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### Datos")
+    src_label = st.radio(
+        "Fuente", ["Google Sheets (en vivo)", "Archivos locales"],
+        help="Google Sheets lee el master file directamente. Requiere que el archivo "
+             "se pueda ver con el enlace. 'Archivos locales' usa la carpeta data/.",
+    )
+    if st.button("Actualizar datos", width="stretch"):
+        st.cache_data.clear()
+
+source = "sheet" if src_label.startswith("Google") else "local"
+try:
+    raw_t, raw_r, lotes, origin = load_raw(source)
+except Exception as e:  # noqa: BLE001
+    if source == "sheet" and (LOCAL_DIR / "Raw_Tendencia.csv").exists():
+        st.warning(
+            "No se pudo leer el Google Sheet. Revisa que esté compartido como "
+            "'Cualquier persona con el enlace puede ver'. Mientras tanto se muestran "
+            f"los archivos locales. Detalle: {e}"
+        )
+        raw_t, raw_r, lotes, origin = load_raw("local")
+    else:
+        st.error(f"No se pudieron cargar los datos: {e}")
+        st.stop()
+
+ts_all, reg_all, escala_comun = prepare(raw_t, raw_r, lotes)
+
+# ---------------------------------------------------------------------------
+# Filtros
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.markdown("### Filtros")
+    years = sorted(ts_all["Mes"].dt.year.unique())
+    y0, y1 = st.select_slider("Años", options=years, value=(years[0], years[-1]))
+
+    cats = sorted(ts_all["Categoria"].unique())
+    sel_cats = st.multiselect("Categoría", cats, default=cats)
+
+    lote_ids = sorted(ts_all["Lote_ID"].unique())
+    lote_labels = {
+        row.Lote_ID: f"{row.Lote_ID} ({str(row.Palabras_clave_del_lote).split(',')[0]}…)"
+        for row in lotes.itertuples() if row.Lote_ID in lote_ids
+    }
+    sel_lotes = st.multiselect(
+        "Lotes", lote_ids, default=lote_ids,
+        format_func=lambda x: lote_labels.get(x, x),
+    )
+
+    countries = sorted(reg_all["Region"].unique())
+    sel_country = st.selectbox("País", ["Todos los países"] + countries)
+
+    hide_dead = st.checkbox("Ocultar keywords sin volumen", value=True,
+                            help="Keywords cuyo máximo en 5 años no pasa de 3.")
+
+mask = (
+    ts_all["Mes"].dt.year.between(y0, y1)
+    & ts_all["Categoria"].isin(sel_cats)
+    & ts_all["Lote_ID"].isin(sel_lotes)
+)
+ts = ts_all[mask].copy()
+if hide_dead:
+    alive = ts_all.groupby("Palabra_clave")["Interes"].max()
+    ts = ts[ts["Palabra_clave"].isin(alive[alive > 3].index)]
+
+reg = reg_all[reg_all["Lote_ID"].isin(sel_lotes) & reg_all["Categoria"].isin(sel_cats)]
+if hide_dead:
+    reg = reg[reg["Palabra_clave"].isin(ts["Palabra_clave"].unique())]
+
+if ts.empty:
+    st.info("No hay datos con estos filtros. Amplía el rango de años o agrega categorías.")
+    st.stop()
+
+metrics = keyword_metrics(ts)
+
+# ---------------------------------------------------------------------------
+# Encabezado y KPIs
+# ---------------------------------------------------------------------------
+last_month = ts["Mes"].max()
+st.markdown('<h1 class="title">Tendencias de búsqueda editoriales</h1>', unsafe_allow_html=True)
+st.markdown(
+    f'<p class="subtitle">{ts["Palabra_clave"].nunique()} palabras clave en '
+    f'{ts["Lote_ID"].nunique()} lotes de Google Trends, {mes_txt(ts["Mes"].min())} a '
+    f'{mes_txt(last_month)}. Fuente: {origin}.</p>',
+    unsafe_allow_html=True,
+)
+
+if not escala_comun:
+    st.markdown(
+        '<div class="note">Cada lote de Google Trends usa su propia escala de 0 a 100. '
+        "Las comparaciones son exactas dentro de un mismo lote; entre lotes distintos son "
+        "orientativas hasta cargar los factores de escala de los puentes "
+        "(columna <b>Factor_escala</b> en la pestaña Lotes).</div>",
+        unsafe_allow_html=True,
+    )
+
+n_up = (metrics["Estado"] == "En alza").sum()
+n_dead = (keyword_metrics(ts_all[ts_all["Lote_ID"].isin(sel_lotes)])["Estado"] == "Sin volumen").sum()
+top = metrics.sort_values("Puntaje", ascending=False).iloc[0]
+riser = metrics[np.isfinite(metrics["Crecimiento"])].sort_values("Crecimiento", ascending=False)
+riser = riser.iloc[0] if len(riser) else top
+
+st.markdown(
+    f"""
+    <div class="kpi-row">
+      <div class="kpi"><div class="v">{ts['Palabra_clave'].nunique()}</div>
+        <div class="l">Palabras clave analizadas</div></div>
+      <div class="kpi"><div class="v">{reg['Region'].nunique()}</div>
+        <div class="l">Países con datos</div></div>
+      <div class="kpi"><div class="v">{n_up}</div>
+        <div class="l">En alza vs. año anterior</div>
+        <div class="d up">{n_up / max(len(metrics), 1):.0%} del total</div></div>
+      <div class="kpi"><div class="v" style="font-size:1.25rem">{top['Palabra_clave']}</div>
+        <div class="l">Mejor puntaje de oportunidad</div>
+        <div class="d">Lote {top['Lote_ID']}, puntaje {top['Puntaje']:.0f}</div></div>
+      <div class="kpi"><div class="v" style="font-size:1.25rem">{riser['Palabra_clave']}</div>
+        <div class="l">Mayor crecimiento anual</div>
+        <div class="d up">{fmt_pct(riser['Crecimiento'])}</div></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+tab_res, tab_trend, tab_map, tab_rank, tab_fc, tab_data = st.tabs(
+    ["Resumen", "Interés en el tiempo", "Mapa por país", "Ranking", "Proyecciones", "Datos"]
+)
+
+# ---------------------------------------------------------------------------
+# Resumen: lectura automática
+# ---------------------------------------------------------------------------
+with tab_res:
+    c1, c2 = st.columns([1.1, 1], gap="large")
+    with c1:
+        st.markdown('<div class="section-h">Lectura automática de los datos</div>', unsafe_allow_html=True)
+        ins = []
+        best = metrics.sort_values("Puntaje", ascending=False).head(3)
+        ins.append("Las keywords con mejor combinación de volumen e impulso son "
+                   + ", ".join(f"<b>{k}</b>" for k in best["Palabra_clave"]) + ".")
+        risers = metrics[(metrics["Estado"] == "En alza") & np.isfinite(metrics["Crecimiento"])]
+        if len(risers):
+            r0 = risers.sort_values("Crecimiento", ascending=False).iloc[0]
+            ins.append(f"<b>{r0['Palabra_clave']}</b> es la que más creció: "
+                       f"{fmt_pct(r0['Crecimiento'])} en los últimos 12 meses frente a los 12 anteriores.")
+        fallers = metrics[metrics["Estado"] == "En baja"]
+        if len(fallers):
+            f0 = fallers.sort_values("Crecimiento").iloc[0]
+            ins.append(f"<b>{f0['Palabra_clave']}</b> pierde interés ({fmt_pct(f0['Crecimiento'])}). "
+                       "Conviene no priorizarla en contenido ni anuncios.")
+        shifts = level_shift(ts)
+        if shifts:
+            by_month = pd.Series([m for _, m, _ in shifts]).dt.to_period("M").value_counts()
+            mm, cnt = by_month.index[0], by_month.iloc[0]
+            if cnt >= 3:
+                ins.append(f"<b>{cnt} de {metrics['Palabra_clave'].nunique()}</b> keywords muestran "
+                           f"un salto de nivel en <b>{MESES[mm.month - 1]} {mm.year}</b>. Si también "
+                           "aparece en el término de control, es un efecto de medición de Google Trends.")
+        prof = seasonal_profile(ts)
+        if len(prof) == 12:
+            hi, lo = prof.idxmax(), prof.idxmin()
+            ins.append(f"Estacionalidad: el interés suele ser más alto en <b>{MESES[hi - 1]}</b> "
+                       f"({prof.max() - 1:+.0%} sobre un mes promedio) y más bajo en "
+                       f"<b>{MESES[lo - 1]}</b> ({prof.min() - 1:+.0%}). Buen dato para planificar campañas.")
+        if n_dead:
+            ins.append(f"<b>{n_dead}</b> keywords de los lotes elegidos no tienen volumen real "
+                       "(máximo de 3 o menos en 5 años) y pueden descartarse.")
+        if sel_country != "Todos los países":
+            rc = reg[reg["Region"] == sel_country].sort_values("Interes_0_100", ascending=False)
+            if len(rc):
+                ins.append(f"En <b>{sel_country}</b>, la keyword con más peso dentro de su lote es "
+                           f"<b>{rc.iloc[0]['Palabra_clave']}</b> ({rc.iloc[0]['Interes_0_100']:.0f}%).")
+        st.markdown("".join(f'<div class="insight">{i}</div>' for i in ins), unsafe_allow_html=True)
+
+    with c2:
+        st.markdown('<div class="section-h">Estado de las keywords</div>', unsafe_allow_html=True)
+        order = ["En alza", "Nueva", "Estable", "En baja", "Sin volumen"]
+        colors = {"En alza": GREEN, "Nueva": "#3F8FB0", "Estable": SLATE,
+                  "En baja": OXBLOOD, "Sin volumen": "#B8BFCA"}
+        est = metrics["Estado"].value_counts().reindex(order).dropna()
+        fig = go.Figure(go.Bar(
+            x=est.values, y=est.index, orientation="h",
+            marker_color=[colors[i] for i in est.index], text=est.values, textposition="outside",
+        ))
+        fig.update_layout(template=TEMPLATE, height=230, yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
+                          xaxis=dict(visible=False))
+        st.plotly_chart(fig, width="stretch")
+
+        st.markdown('<div class="section-h">Interés promedio por categoría</div>', unsafe_allow_html=True)
+        cat = (ts.groupby(["Mes", "Categoria"])["Interes"].mean().reset_index())
+        cat = cat.sort_values("Mes")
+        cat["Suav"] = cat.groupby("Categoria")["Interes"].transform(
+            lambda x: x.rolling(3, min_periods=1).mean())
+        fig = px.line(cat, x="Mes", y="Suav", color="Categoria",
+                      labels={"Suav": "Interés (media 3 meses)", "Mes": ""})
+        fig.update_layout(template=TEMPLATE, height=300)
+        st.plotly_chart(fig, width="stretch")
+
+# ---------------------------------------------------------------------------
+# Interés en el tiempo
+# ---------------------------------------------------------------------------
+with tab_trend:
+    kws = metrics.sort_values("Puntaje", ascending=False)["Palabra_clave"].tolist()
+    c1, c2, c3 = st.columns([3, 1, 1])
+    with c1:
+        pick = st.multiselect("Palabras clave a comparar", kws, default=kws[:5], max_selections=8)
+    with c2:
+        smooth = st.selectbox("Suavizado", ["Sin suavizar", "Media 3 meses", "Media 6 meses"])
+    with c3:
+        mode = st.selectbox("Escala", ["Valores de Trends", "Índice (máx. = 100)"])
+    if pick:
+        d = ts[ts["Palabra_clave"].isin(pick)].sort_values("Mes").copy()
+        w = {"Sin suavizar": 1, "Media 3 meses": 3, "Media 6 meses": 6}[smooth]
+        d["Valor"] = d.groupby("Palabra_clave")["Interes"].transform(
+            lambda x: x.rolling(w, min_periods=1).mean())
+        if mode.startswith("Índice"):
+            d["Valor"] = d.groupby("Palabra_clave")["Valor"].transform(
+                lambda x: 100 * x / x.max() if x.max() > 0 else x)
+        if d["Lote_ID"].nunique() > 1 and not escala_comun:
+            st.caption("Estás comparando keywords de lotes distintos: la altura relativa entre "
+                       "ellas es orientativa. Usa 'Índice' para comparar solo la forma de la curva.")
+        fig = px.line(d, x="Mes", y="Valor", color="Palabra_clave",
+                      labels={"Valor": "Interés", "Mes": "", "Palabra_clave": ""},
+                      hover_data={"Lote_ID": True})
+        fig.update_traces(line_width=2.2)
+        fig.update_layout(template=TEMPLATE, height=430, hovermode="x unified")
+        st.plotly_chart(fig, width="stretch")
+
+        st.markdown('<div class="section-h">Estacionalidad</div>', unsafe_allow_html=True)
+        kw_s = st.selectbox("Palabra clave", pick, key="season_kw")
+        s = ts[ts["Palabra_clave"] == kw_s].copy()
+        s["Año"] = s["Mes"].dt.year
+        s["M"] = s["Mes"].dt.month
+        piv = s.pivot_table(index="Año", columns="M", values="Interes", aggfunc="mean")
+        piv = piv.reindex(columns=range(1, 13))
+        fig = go.Figure(go.Heatmap(
+            z=piv.values, x=MESES, y=piv.index.astype(str), colorscale=SEQ_SCALE,
+            hovertemplate="%{x} %{y}: %{z:.0f}<extra></extra>", xgap=2, ygap=2,
+            colorbar=dict(thickness=10, outlinewidth=0),
+        ))
+        fig.update_layout(template=TEMPLATE, height=260, yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
+        st.plotly_chart(fig, width="stretch")
+    else:
+        st.info("Elige al menos una palabra clave.")
+
+# ---------------------------------------------------------------------------
+# Mapa por país
+# ---------------------------------------------------------------------------
+with tab_map:
+    st.markdown(
+        '<div class="note">Los valores por país indican qué parte del interés del lote se lleva '
+        "cada keyword dentro de ese país (como en Google Trends). Sirven para ver qué domina en cada "
+        "mercado, no para comparar volumen entre países.</div>",
+        unsafe_allow_html=True,
+    )
+    kws_r = (reg.groupby("Palabra_clave")["Interes_0_100"].sum()
+             .sort_values(ascending=False).index.tolist())
+    if not kws_r:
+        st.info("No hay datos por país con estos filtros.")
+    else:
+        c1, c2 = st.columns([2.2, 1], gap="large")
+        with c1:
+            kw_m = st.selectbox("Palabra clave", kws_r)
+            dm = reg[reg["Palabra_clave"] == kw_m].copy()
+            dm["ISO3"] = dm["Region"].map(iso3)
+            fig = px.choropleth(
+                dm.dropna(subset=["ISO3"]), locations="ISO3", color="Interes_0_100",
+                hover_name="Region", color_continuous_scale=SEQ_SCALE, range_color=(0, 100),
+                labels={"Interes_0_100": "Interés"},
+            )
+            fig.update_geos(showframe=False, showcoastlines=False, projection_type="natural earth",
+                            showland=True, landcolor="#F3F4F6", showcountries=True,
+                            countrycolor="#FFFFFF", bgcolor="rgba(0,0,0,0)")
+            fig.update_layout(template=TEMPLATE, height=470, margin=dict(l=0, r=0, t=10, b=0),
+                              coloraxis_colorbar=dict(thickness=10, outlinewidth=0, title=None))
+            st.plotly_chart(fig, width="stretch")
+        with c2:
+            st.markdown('<div class="section-h">Países donde más pesa</div>', unsafe_allow_html=True)
+            topc = dm.sort_values("Interes_0_100", ascending=False).head(12)
+            fig = go.Figure(go.Bar(
+                x=topc["Interes_0_100"], y=topc["Region"], orientation="h", marker_color=INK,
+                text=topc["Interes_0_100"].round(0), textposition="outside",
+            ))
+            fig.update_layout(template=TEMPLATE, height=440,
+                              yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"),
+                              xaxis=dict(visible=False, range=[0, 115]))
+            st.plotly_chart(fig, width="stretch")
+
+        st.markdown('<div class="section-h">Mapa de calor: keywords por país</div>', unsafe_allow_html=True)
+        lote_h = st.selectbox("Lote", sorted(reg["Lote_ID"].unique()),
+                              format_func=lambda x: lote_labels.get(x, x), key="heat_lote")
+        dh = reg[reg["Lote_ID"] == lote_h]
+        top_countries = (dh.groupby("Region")["Interes_0_100"].sum()
+                         .sort_values(ascending=False).head(25).index)
+        if sel_country != "Todos los países" and sel_country not in top_countries:
+            top_countries = top_countries.append(pd.Index([sel_country]))
+        hm = dh[dh["Region"].isin(top_countries)].pivot_table(
+            index="Palabra_clave", columns="Region", values="Interes_0_100")
+        hm = hm.loc[hm.sum(axis=1).sort_values(ascending=False).index]
+        fig = go.Figure(go.Heatmap(
+            z=hm.values, x=hm.columns, y=hm.index, colorscale=SEQ_SCALE, zmin=0, zmax=100,
+            xgap=1, ygap=1, hovertemplate="%{y}, %{x}: %{z:.0f}<extra></extra>",
+            colorbar=dict(thickness=10, outlinewidth=0),
+        ))
+        fig.update_layout(template=TEMPLATE, height=90 + 34 * len(hm),
+                          xaxis=dict(tickangle=-45), yaxis=dict(autorange="reversed", gridcolor="rgba(0,0,0,0)"))
+        st.plotly_chart(fig, width="stretch")
+
+# ---------------------------------------------------------------------------
+# Ranking
+# ---------------------------------------------------------------------------
+with tab_rank:
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        rank_by = st.selectbox("Ordenar por", ["Puntaje de oportunidad", "Interés últimos 12 meses",
+                                               "Crecimiento anual", "Pico histórico"])
+    with c2:
+        estados = st.multiselect("Estado", ["En alza", "Nueva", "Estable", "En baja", "Sin volumen"],
+                                 default=["En alza", "Nueva", "Estable", "En baja"])
+    col = {"Puntaje de oportunidad": "Puntaje", "Interés últimos 12 meses": "Promedio_12m",
+           "Crecimiento anual": "Crecimiento", "Pico histórico": "Pico"}[rank_by]
+    rk = metrics[metrics["Estado"].isin(estados)].copy()
+    rk["_sort"] = rk[col].replace([np.inf], 1e9)
+    rk = rk.sort_values("_sort", ascending=False).reset_index(drop=True)
+    rk.index = rk.index + 1
+    rk["Crec_txt"] = rk["Crecimiento"].map(fmt_pct)
+    rk["Pico_txt"] = rk["Mes_pico"].map(mes_txt)
+    st.dataframe(
+        rk[["Palabra_clave", "Categoria", "Lote_ID", "Puntaje", "Promedio_12m",
+            "Crec_txt", "Pico_txt", "Estado", "Serie"]],
+        width="stretch", height=min(38 * (len(rk) + 1), 720),
+        column_config={
+            "Palabra_clave": st.column_config.TextColumn("Palabra clave", width="medium"),
+            "Categoria": "Categoría",
+            "Lote_ID": st.column_config.TextColumn("Lote", width="small"),
+            "Puntaje": st.column_config.ProgressColumn("Puntaje", min_value=0, max_value=100, format="%.0f"),
+            "Promedio_12m": st.column_config.NumberColumn("Interés 12 m", format="%.1f"),
+            "Crec_txt": st.column_config.TextColumn("Crec. anual", width="small"),
+            "Pico_txt": st.column_config.TextColumn("Mes pico", width="small"),
+            "Estado": st.column_config.TextColumn("Estado", width="small"),
+            "Serie": st.column_config.LineChartColumn("Últimos 24 meses", width="medium"),
+        },
+    )
+    st.caption("Puntaje de oportunidad = 60% interés reciente (relativo al máximo de su lote) "
+               "+ 40% impulso (crecimiento de los últimos 12 meses frente a los 12 anteriores).")
+
+    st.download_button("Descargar ranking (CSV)",
+                       rk.drop(columns=["Serie", "_sort"]).to_csv(index=False).encode("utf-8"),
+                       "ranking_keywords.csv", "text/csv")
+
+    if sel_country != "Todos los países":
+        st.markdown(f'<div class="section-h">Ranking en {sel_country}</div>', unsafe_allow_html=True)
+        rc = (reg[reg["Region"] == sel_country]
+              .sort_values("Interes_0_100", ascending=False)[["Palabra_clave", "Lote_ID", "Interes_0_100"]])
+        st.dataframe(rc.reset_index(drop=True), width="stretch", column_config={
+            "Palabra_clave": "Palabra clave", "Lote_ID": "Lote",
+            "Interes_0_100": st.column_config.ProgressColumn("Peso en el lote", min_value=0,
+                                                             max_value=100, format="%.0f"),
+        })
+
+# ---------------------------------------------------------------------------
+# Proyecciones
+# ---------------------------------------------------------------------------
+with tab_fc:
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        kw_f = st.selectbox("Palabra clave", kws, key="fc_kw")
+    with c2:
+        horizon = st.select_slider("Meses a proyectar", options=[3, 6, 9, 12], value=6)
+    full = ts_all[ts_all["Palabra_clave"] == kw_f].sort_values("Mes")
+    fc, method = forecast(tuple(full["Interes"]), tuple(full["Mes"].astype(str)), horizon)
+    hist = full[full["Mes"].dt.year >= y0]
+
+    now = full["Interes"].iloc[-3:].mean()
+    fut = fc["Pronostico"].iloc[-3:].mean()
+    chg = (fut - now) / now if now > 0 else np.nan
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Promedio últimos 3 meses", f"{now:.1f}")
+    k2.metric(f"Promedio proyectado (meses {horizon - 2}–{horizon})", f"{fut:.1f}",
+              delta=fmt_pct(chg) if np.isfinite(chg) else None)
+    k3.metric("Mes con mayor valor proyectado",
+              mes_txt(fc.loc[fc["Pronostico"].idxmax(), "Mes"]))
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist["Mes"], y=hist["Interes"], name="Histórico",
+                             line=dict(color=INK, width=2.2)))
+    fig.add_trace(go.Scatter(
+        x=pd.concat([fc["Mes"], fc["Mes"][::-1]]),
+        y=pd.concat([fc["Max"], fc["Min"][::-1]]),
+        fill="toself", fillcolor="rgba(184,137,43,0.16)", line=dict(width=0),
+        name="Rango probable (80%)", hoverinfo="skip"))
+    fig.add_trace(go.Scatter(
+        x=pd.concat([hist["Mes"].iloc[-1:], fc["Mes"]]),
+        y=pd.concat([hist["Interes"].iloc[-1:], fc["Pronostico"]]),
+        name="Proyección", line=dict(color=GOLD, width=2.4, dash="dot")))
+    fig.update_layout(template=TEMPLATE, height=420, hovermode="x unified")
+    st.plotly_chart(fig, width="stretch")
+    st.caption(f"Método: {method}. La proyección asume que el patrón reciente continúa; "
+               "no anticipa cambios de algoritmo, campañas ni eventos externos.")
+
+    st.markdown('<div class="section-h">Proyección de todas las keywords filtradas</div>',
+                unsafe_allow_html=True)
+    if st.toggle("Calcular tabla de proyecciones", value=False,
+                 help="Ajusta un modelo por keyword; puede tardar unos segundos con muchas keywords."):
+        rows = []
+        for kw in kws:
+            f = ts_all[ts_all["Palabra_clave"] == kw].sort_values("Mes")
+            p, _ = forecast(tuple(f["Interes"]), tuple(f["Mes"].astype(str)), horizon)
+            a = f["Interes"].iloc[-3:].mean()
+            b = p["Pronostico"].iloc[-3:].mean()
+            rows.append(dict(Palabra_clave=kw, Lote=f["Lote_ID"].iloc[0], Actual=a, Proyectado=b,
+                             Cambio=(b - a) / a if a > 0 else np.nan))
+        pt = pd.DataFrame(rows).sort_values("Cambio", ascending=False)
+        pt["Cambio"] = pt["Cambio"].map(fmt_pct)
+        st.dataframe(pt.reset_index(drop=True), width="stretch", column_config={
+            "Palabra_clave": "Palabra clave",
+            "Actual": st.column_config.NumberColumn("Últimos 3 meses", format="%.1f"),
+            "Proyectado": st.column_config.NumberColumn(f"Proyección a {horizon} meses", format="%.1f"),
+            "Cambio": "Cambio esperado",
+        })
+
+# ---------------------------------------------------------------------------
+# Datos
+# ---------------------------------------------------------------------------
+with tab_data:
+    st.markdown('<div class="section-h">Lotes cargados</div>', unsafe_allow_html=True)
+    show_cols = [c for c in ["Lote_ID", "Fecha_extraccion", "Palabras_clave_del_lote",
+                             "Filas_tendencia", "Filas_region", "Notas"] if c in lotes.columns]
+    st.dataframe(lotes[show_cols], width="stretch", hide_index=True)
+    st.markdown('<div class="section-h">Serie mensual filtrada</div>', unsafe_allow_html=True)
+    st.dataframe(ts.drop(columns=["Interes_0_100"]).sort_values(["Lote_ID", "Palabra_clave", "Mes"]),
+                 width="stretch", hide_index=True, height=360)
+    st.download_button("Descargar serie filtrada (CSV)", ts.to_csv(index=False).encode("utf-8"),
+                       "serie_filtrada.csv", "text/csv")
